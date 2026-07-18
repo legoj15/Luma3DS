@@ -36,6 +36,7 @@ static u8 CTR_ALIGN(8) fileServiceThreadStack[0x4000];
 static bool  g_running = false;
 static bool  g_shouldStop = false;
 static bool  g_commitInFlight = false;
+static bool  g_threadLive = false;   // a thread object exists (running or exiting)
 static u32   g_nonce = 0;
 
 // .bss, never the 0x4000 thread stack.
@@ -868,6 +869,7 @@ void fileServiceThreadMain(void)
 
 cleanup:
     g_running = false;
+    g_threadLive = false;
     if(ctrlListen >= 0) socClose(ctrlListen);
     if(dataListen >= 0) socClose(dataListen);
     if(commitSock >= 0) socClose(commitSock);
@@ -876,9 +878,21 @@ cleanup:
 
 Result FileService_TryStart(void)
 {
-    if(g_running)
+    // Bounded, and only ever one live thread. The menu tick calls this every
+    // 50ms while the service is not running, and MyThread_Create panics on
+    // failure -- so an unguarded retry would spawn threads until the console
+    // dies. A bind failure (WiFi not up yet) must cost a few retries, not the
+    // system.
+    static u32 attempts = 0;
+
+    if(g_running || g_threadLive)
         return 0;
+    if(attempts >= 5)
+        return -1;
+
+    attempts++;
     g_shouldStop = false;
+    g_threadLive = true;
     fileServiceCreateThread();
     return 0;
 }
