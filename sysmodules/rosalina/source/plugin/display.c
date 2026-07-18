@@ -24,7 +24,10 @@ void    DispMessage(const char *title, const char *message)
     do
     {
         keys = waitComboWithTimeout(1000);
-    }while (!preTerminationRequested && !(keys & KEY_B));
+    // n3ds-mcp: honour menuShouldExit, so the remote close works here too.
+    // The readout can now SEE these screens; without this an agent could
+    // see one and have no way to leave it except a remote B press.
+    }while (!preTerminationRequested && !(keys & KEY_B) && !menuShouldExit);
 
     Draw_Unlock(); ///< Keep it locked until we exit the message
     menuLeave();
@@ -52,7 +55,10 @@ u32    DispErrMessage(const char *title, const char *message, const Result error
     do
     {
         keys = waitComboWithTimeout(1000);
-    }while (!preTerminationRequested && !(keys & KEY_B));
+    // n3ds-mcp: honour menuShouldExit, so the remote close works here too.
+    // The readout can now SEE these screens; without this an agent could
+    // see one and have no way to leave it except a remote B press.
+    }while (!preTerminationRequested && !(keys & KEY_B) && !menuShouldExit);
 
     Draw_Unlock();  ///< Keep it locked until we exit the message
     menuLeave();
@@ -123,7 +129,7 @@ void    DisplayPluginMenu(u32   *cmdbuf)
             if (--cursor >= nbItems)
                 cursor = nbItems - 1;
 
-    } while (true);
+    } while (!menuShouldExit); // n3ds-mcp: was `true` -- unescapable remotely
 
     Draw_Unlock();
     menuLeave();

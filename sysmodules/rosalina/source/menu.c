@@ -466,10 +466,28 @@ s32 menuGetRefCount(void)
 void menuEnter(void)
 {
     Draw_Lock();
-    if(!menuShouldExit && menuRefCount == 0)
+
+    // n3ds-mcp: increment UNCONDITIONALLY once entered, doing the heavy setup
+    // only on the 0 -> 1 transition.
+    //
+    // Upstream no-ops here whenever menuRefCount != 0 while menuLeave always
+    // decrements, so a nested enter/leave pair (the plugin display paths do
+    // this) tears down the OUTER overlay's framebuffer and restores the app's
+    // frame while the outer menu is still running. Counting properly makes the
+    // pairs balance.
+    //
+    // Declining is still correct when the menu is being torn down and we are
+    // not already inside it; leaving the count at 0 means the paired
+    // menuLeave's underflow guard turns into a no-op.
+    if(menuShouldExit && menuRefCount == 0)
+    {
+        Draw_Unlock();
+        return;
+    }
+
+    if(menuRefCount++ == 0)
     {
         menuCloseRequested = false;
-        menuRefCount++;
         svcKernelSetState(0x10000, 2 | 1);
         svcSleepThread(5 * 1000 * 100LL);
         if (R_FAILED(Draw_AllocateFramebufferCache(FB_BOTTOM_SIZE)))
