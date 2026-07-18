@@ -48,6 +48,16 @@ Result InputRedirection_DoOrUndoPatches(void);
 void InputRedirection_WriteProbeLog(int sent, int sent2, int tmpsock,
                                     u32 srclen, u32 family, u32 addrBE, u32 portHost);
 
+// Lifecycle trace. Input redirection going down is otherwise invisible from
+// the PC -- the port just goes quiet, which looks like every other failure.
+#define IR_LIFECYCLE_LOG_PATH "/luma/n3ds-mcp-ir.txt"
+void InputRedirection_WriteLifecycleLog(const char *event, int cmdSock, int a, int b);
+
+// The command channel lives on its own socket/port so that a fault in it can
+// never take down HID injection. 4950 stays exactly as upstream.
+#define REMOTE_CMD_PORT 4951
+void InputRedirection_HandleCommand(int cmdSock, u32 *errorCount);
+
 // One-shot "close the Rosalina menu" request, set by the IR UDP thread on a
 // bit3 rising edge and consumed (cleared, together with menuShouldExit) by
 // the menu thread's poll loop.

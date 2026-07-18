@@ -127,14 +127,46 @@ void inputRedirectionThreadMain(void)
 
     u32 *irDataPhys = PA_FROM_VA_PTR(irData);
 
+    // n3ds-mcp: the command channel gets its OWN socket on its own port.
+    //
+    // It used to share this one, which was a mistake: socRecvfrom with a real
+    // sockaddr issues a different IPC shape than the stock NULL call, and the
+    // loop below treats ANY recvfrom error as fatal (`break`), so an untested
+    // path was handed the power to permanently kill all HID injection until
+    // reboot. Failures on cmdSock must never be able to do that, and the HID
+    // recv below is now byte-for-byte the stock call again.
+    int cmdSock = socSocket(AF_INET, SOCK_DGRAM, 0);
+    if(cmdSock >= 0)
+    {
+        struct sockaddr_in caddr;
+        caddr.sin_family = AF_INET;
+        caddr.sin_port = htons(REMOTE_CMD_PORT);
+        caddr.sin_addr.s_addr = socGethostid();
+        if(socBind(cmdSock, (struct sockaddr *)&caddr, sizeof(caddr)) != 0)
+        {
+            socClose(cmdSock);
+            cmdSock = -1;
+        }
+    }
+    InputRedirection_WriteLifecycleLog("thread started", cmdSock, 0, 0);
+
     char buf[20];
     u32 oldSpecialButtons = 0, specialButtons = 0;
+    u32 cmdErrors = 0;
     while(inputRedirectionEnabled && !preTerminationRequested)
     {
-        struct pollfd pfd;
-        pfd.fd = sock;
-        pfd.events = POLLIN;
-        pfd.revents = 0;
+        struct pollfd pfd[2];
+        nfds_t nfds = 1;
+        pfd[0].fd = sock;
+        pfd[0].events = POLLIN;
+        pfd[0].revents = 0;
+        if(cmdSock >= 0)
+        {
+            pfd[1].fd = cmdSock;
+            pfd[1].events = POLLIN;
+            pfd[1].revents = 0;
+            nfds = 2;
+        }
 
         if (Sleep__Status())
         {
@@ -143,100 +175,24 @@ void inputRedirectionThreadMain(void)
                 svcSleepThread(1000000000ULL);
         }
 
-        int pollres = socPoll(&pfd, 1, 10);
-        if(pollres > 0 && (pfd.revents & POLLIN))
+        int pollres = socPoll(pfd, nfds, 10);
+
+        // n3ds-mcp: command channel. Handled before the HID path and entirely
+        // isolated from it -- no error here can break the loop.
+        if(pollres > 0 && nfds == 2 && (pfd[1].revents & POLLIN))
+            InputRedirection_HandleCommand(cmdSock, &cmdErrors);
+
+        if(pollres > 0 && (pfd[0].revents & POLLIN))
         {
-            // n3ds-mcp: a real sockaddr is now requested so command packets
-            // can be answered. Safe only because the minisoc fill-in was
-            // bounded first -- the stock code underflowed *addrlen here.
-            struct sockaddr_in src;
-            socklen_t srclen = sizeof(src);
-            int n = socRecvfrom(sock, buf, 20, 0, (struct sockaddr *)&src, &srclen);
+            // Stock call: NULL sockaddr, exactly as upstream. Do not add a
+            // real sockaddr here -- see the comment above cmdSock.
+            int n = socRecvfrom(sock, buf, 20, 0, NULL, 0);
             if(n < 0)
-                break;
-
-            // n3ds-mcp: out-of-band commands. These are shorter than 12 bytes,
-            // so they fall through the guard below on stock Luma and can never
-            // be mistaken for HID data here.
-            if(n == REMOTE_CMD_LEN && srclen >= (socklen_t)sizeof(struct sockaddr_in))
             {
-                u64 now = svcGetSystemTick();
-
-                // Rate limit. Without this an 8-byte flood would put a
-                // synchronous IPC on the thread that carries all HID
-                // injection -- such packets cost nothing today.
-                if(now - lastRemoteCmdTick < REMOTE_CMD_MIN_TICKS)
-                    continue;
-
-                if(memcmp(buf, REMOTE_MAGIC_REBOOT, 4) == 0)
-                {
-                    u32 key;
-                    memcpy(&key, buf + 4, 4);
-                    if(key == REMOTE_REBOOT_KEY)
-                    {
-                        lastRemoteCmdTick = now;
-                        // Force any open menu to unwind, then let the menu
-                        // thread do the actual reset.
-                        menuShouldExit = true;
-                        remoteRebootRequested = true;
-                    }
-                    continue;
-                }
-
-                if(memcmp(buf, REMOTE_MAGIC_QUERY, 4) == 0)
-                {
-                    lastRemoteCmdTick = now;
-
-                    // TRANSPORT PROBE (temporary): a fixed reply, purely to
-                    // establish whether socSendto works at all from this
-                    // thread. socSendto has NO callers anywhere in Rosalina,
-                    // so it is entirely unexercised code -- exactly like the
-                    // recvfrom sockaddr path that turned out to be broken.
-                    //
-                    // NOTE: deliberately NOT gated on Wifi__IsConnected().
-                    // We just received a datagram from the client, which is
-                    // far stronger evidence the network works than an ac:u
-                    // status query -- and that call does two IPC round-trips
-                    // on the thread that carries all HID injection, so it can
-                    // only ever produce false negatives here.
-                    u8 reply[16] = { 'R', 'S', 'C', 'r' };
-                    reply[4] = buf[4];              // echo the client's seq
-                    reply[5] = buf[5];
-                    reply[6] = 0;                   // version 0 = probe build
-                    reply[7] = menuGetRefCount() > 0 ? 1 : 0;
-
-                    // Path 1: the bound socket.
-                    reply[8] = 1;
-                    int sent = socSendto(sock, reply, sizeof(reply), 0,
-                                         (struct sockaddr *)&src, srclen);
-
-                    // Path 2: a fresh unbound socket, if the bound one refused.
-                    int sent2 = 0, tmpsock = -1;
-                    if(sent < 0)
-                    {
-                        tmpsock = socSocket(AF_INET, SOCK_DGRAM, 0);
-                        if(tmpsock >= 0)
-                        {
-                            reply[8] = 2;
-                            sent2 = socSendto(tmpsock, reply, sizeof(reply), 0,
-                                              (struct sockaddr *)&src, srclen);
-                            socClose(tmpsock);
-                        }
-                    }
-
-                    // Report through a channel that does NOT depend on the
-                    // thing being tested. If no reply reaches the PC, this
-                    // file still says why -- and in particular distinguishes
-                    // "the console failed to send" from "the send succeeded
-                    // and something on the network or PC dropped it".
-                    InputRedirection_WriteProbeLog(sent, sent2, tmpsock,
-                                                   (u32)srclen,
-                                                   (u32)src.sin_family,
-                                                   (u32)src.sin_addr.s_addr,
-                                                   (u32)ntohs(src.sin_port));
-                }
-                continue;
+                InputRedirection_WriteLifecycleLog("hid recvfrom failed", cmdSock, n, 0);
+                break;
             }
+
 
             if(n < 12)
                 continue;
@@ -603,6 +559,108 @@ static FS_ArchiveID InputRedirection_GetCfgArchiveId(void)
     s64 out = 0;
     svcGetSystemInfo(&out, 0x10000, 0x203); // isSdMode
     return (bool)out ? ARCHIVE_SDMC : ARCHIVE_NAND_RW;
+}
+
+// n3ds-mcp: append a lifecycle event to the SD card.
+//
+// Input redirection is invisible from the PC when it is not running: the port
+// simply goes quiet, which looks identical to a wrong IP, a firewall, stale
+// firmware, or a dead thread. This turns that silence into a readable record.
+// Appends rather than truncates, so the boot-to-death sequence survives.
+void InputRedirection_WriteLifecycleLog(const char *event, int cmdSock, int a, int b)
+{
+    IFile file;
+    char text[192];
+    u64 written = 0;
+    u64 offset = 0;
+
+    int len = sprintf(text, "[%u] %s (cmdSock=%d a=%d b=%d)\n",
+                      (unsigned)(svcGetSystemTick() / (SYSCLOCK_ARM11 / 1000)),
+                      event, cmdSock, a, b);
+    if(len <= 0)
+        return;
+
+    if(R_SUCCEEDED(IFile_Open(&file, InputRedirection_GetCfgArchiveId(),
+                              fsMakePath(PATH_EMPTY, ""),
+                              fsMakePath(PATH_ASCII, IR_LIFECYCLE_LOG_PATH),
+                              FS_OPEN_CREATE | FS_OPEN_WRITE)))
+    {
+        if(R_SUCCEEDED(IFile_GetSize(&file, &offset)))
+            file.pos = offset;
+        IFile_Write(&file, &written, text, (u32)len, 0);
+        IFile_Close(&file);
+    }
+}
+
+// n3ds-mcp: the command channel, on its own socket. Deliberately cannot break
+// the caller's loop -- errors are counted and logged, never fatal, because
+// this path must never be able to take HID injection down with it.
+void InputRedirection_HandleCommand(int cmdSock, u32 *errorCount)
+{
+    char cbuf[32];
+    struct sockaddr_in src;
+    socklen_t srclen = sizeof(src);
+
+    int n = socRecvfrom(cmdSock, cbuf, sizeof(cbuf), 0,
+                        (struct sockaddr *)&src, &srclen);
+    if(n < 0)
+    {
+        if((*errorCount)++ < 5)
+            InputRedirection_WriteLifecycleLog("cmd recvfrom failed", cmdSock, n, (int)*errorCount);
+        return;
+    }
+
+    if(n != REMOTE_CMD_LEN)
+        return;
+
+    u64 now = svcGetSystemTick();
+    if(now - lastRemoteCmdTick < REMOTE_CMD_MIN_TICKS)
+        return;
+    lastRemoteCmdTick = now;
+
+    if(memcmp(cbuf, REMOTE_MAGIC_REBOOT, 4) == 0)
+    {
+        u32 key;
+        memcpy(&key, cbuf + 4, 4);
+        if(key == REMOTE_REBOOT_KEY)
+        {
+            InputRedirection_WriteLifecycleLog("reboot requested", cmdSock, 0, 0);
+            menuShouldExit = true;
+            remoteRebootRequested = true;
+        }
+        return;
+    }
+
+    if(memcmp(cbuf, REMOTE_MAGIC_QUERY, 4) == 0)
+    {
+        u8 reply[16] = { 'R', 'S', 'C', 'r' };
+        reply[4] = cbuf[4];             // echo the client's seq
+        reply[5] = cbuf[5];
+        reply[6] = 0;                   // version 0 = probe build
+        reply[7] = menuGetRefCount() > 0 ? 1 : 0;
+
+        reply[8] = 1;
+        int sent = socSendto(cmdSock, reply, sizeof(reply), 0,
+                             (struct sockaddr *)&src, srclen);
+
+        int sent2 = 0, tmpsock = -1;
+        if(sent < 0)
+        {
+            tmpsock = socSocket(AF_INET, SOCK_DGRAM, 0);
+            if(tmpsock >= 0)
+            {
+                reply[8] = 2;
+                sent2 = socSendto(tmpsock, reply, sizeof(reply), 0,
+                                  (struct sockaddr *)&src, srclen);
+                socClose(tmpsock);
+            }
+        }
+
+        InputRedirection_WriteProbeLog(sent, sent2, tmpsock, (u32)srclen,
+                                       (u32)src.sin_family,
+                                       (u32)src.sin_addr.s_addr,
+                                       (u32)ntohs(src.sin_port));
+    }
 }
 
 // n3ds-mcp TRANSPORT PROBE (temporary). Reports socSendto results through the
