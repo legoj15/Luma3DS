@@ -40,6 +40,8 @@
 #include "menus/screen_filters.h"
 #include "shell.h"
 #include "input_redirection.h"
+#include "fileservice.h" // n3ds-mcp
+#include "devmode.h" // n3ds-mcp
 
 //#define ROSALINA_MENU_SELF_SCREENSHOT 1 // uncomment this to enable the feature
 
@@ -377,6 +379,12 @@ void menuThreadMain(void)
         // n3ds-mcp fork: runs before the menuShouldExit gate so a lid-closed
         // boot (shell-closed keeps menuShouldExit true) can still arm itself.
         InputRedirection_HandleAutostart();
+
+        // n3ds-mcp: the file service replaces the ftpd dependency, which was
+        // a homebrew app and so did not survive a reboot. Gated on the same
+        // dev-mode switch; TryStart is a no-op once it is running.
+        if (DevMode_IsEnabled() && !FileService_IsRunning())
+            FileService_TryStart();
 
         // n3ds-mcp fork: consume a one-shot remote reboot. Deliberately placed
         // before the menuShouldExit gate, because the IR thread sets that flag

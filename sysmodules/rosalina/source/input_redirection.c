@@ -36,6 +36,7 @@
 #include "sleep.h"
 #include "sock_util.h"
 #include "ifile.h"
+#include "devmode.h" // n3ds-mcp
 #include "fmt.h" // n3ds-mcp: sprintf, for the transport probe log
 #include "draw.h" // n3ds-mcp: glyph mirror serialisation
 
@@ -790,6 +791,15 @@ void InputRedirection_HandleAutostart(void)
 {
     static u32 ticks = 0;
     static u32 attempts = 0;
+
+    // n3ds-mcp: development mode is the single master switch. With it off the
+    // console is a stock gaming handheld across reboots -- no services, no
+    // sleep inhibition.
+    if(!DevMode_IsEnabled())
+    {
+        autostartState = AUTOSTART_DONE;
+        return;
+    }
 
     if(autostartState == AUTOSTART_DONE)
         return;

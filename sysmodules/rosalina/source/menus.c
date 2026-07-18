@@ -27,6 +27,7 @@
 #include <3ds.h>
 #include <3ds/os.h>
 #include "menus.h"
+#include "devmode.h" // n3ds-mcp
 #include "menu.h"
 #include "draw.h"
 #include "menus/process_list.h"
@@ -54,6 +55,7 @@ Menu rosalinaMenu = {
         { "Debugger options...", MENU, .menu = &debuggerMenu },
         { "System configuration...", MENU, .menu = &sysconfigMenu },
         { "Miscellaneous options...", MENU, .menu = &miscellaneousMenu },
+        { "n3ds-mcp development mode", METHOD, .method = &RosalinaMenu_DevMode }, // n3ds-mcp
         { "Save settings", METHOD, .method = &RosalinaMenu_SaveSettings },
         { "Return To HOME Menu", METHOD, .method = &RosalinaMenu_ReturnToHomeMenu },
         { "Power off / reboot", METHOD, .method = &RosalinaMenu_PowerOffOrReboot },
