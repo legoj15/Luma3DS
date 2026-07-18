@@ -791,7 +791,11 @@ static void FS_HandleCommit(int sock)
     reply[4] = ok ? 1 : 0;
     reply[5] = reply[6] = reply[7] = 0;
     memcpy(reply + 8, &g_nonce, 4);
-    if(srclen >= (socklen_t)sizeof(struct sockaddr_in))
+    // minisoc writes back the CTR sockaddr length (8 for AF_INET), never
+    // sizeof(struct sockaddr_in) (16) -- a >=16 guard can never pass, which is
+    // why no commit reply ever reached a client. socSendto itself refuses
+    // anything shorter than 8, so this is the whole check.
+    if(srclen >= 8)
         socSendto(sock, reply, sizeof(reply), 0, (struct sockaddr *)&src, srclen);
 }
 
