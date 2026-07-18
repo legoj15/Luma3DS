@@ -1,0 +1,43 @@
+name: Build boot.firm
+
+on:
+  push:
+    branches: [n3ds-mcp]
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: devkitpro/devkitarm:latest
+    steps:
+      - name: Checkout (full history for git describe)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Trust checkout directory
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Install firmtool and makerom
+        run: |
+          set -ex
+          apt-get update
+          apt-get install -y python3-pip jq unzip curl
+          pip3 install --break-system-packages git+https://github.com/TuxSH/firmtool.git || pip3 install git+https://github.com/TuxSH/firmtool.git
+          ASSET_URL=$(curl -s https://api.github.com/repos/3DSGuy/Project_CTR/releases \
+            | jq -r '[.[] | select(.tag_name | startswith("makerom"))][0].assets[] | select(.name | test("ubuntu")) | .browser_download_url')
+          curl -L "$ASSET_URL" -o makerom.zip
+          unzip -o makerom.zip -d /usr/local/bin
+          chmod +x /usr/local/bin/makerom
+          makerom -help 2>&1 | head -n 1 || true
+          firmtool -v || true
+
+      - name: Build
+        run: make -j"$(nproc)" boot.firm
+
+      - name: Upload boot.firm
+        uses: actions/upload-artifact@v4
+        with:
+          name: boot.firm-n3ds-mcp
+          path: boot.firm
+          if-no-files-found: error
