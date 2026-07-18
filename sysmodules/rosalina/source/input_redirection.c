@@ -612,7 +612,7 @@ void InputRedirection_WriteProbeLog(int sent, int sent2, int tmpsock,
                                     u32 srclen, u32 family, u32 addrBE, u32 portHost)
 {
     IFile file;
-    char text[320];
+    char text[512];
     u64 written = 0;
     u32 ip = addrBE;
 
