@@ -22,13 +22,13 @@ jobs:
         run: |
           set -ex
           apt-get update
-          apt-get install -y python3-pip jq unzip curl
+          apt-get install -y python3-pip build-essential
           pip3 install --break-system-packages git+https://github.com/TuxSH/firmtool.git || pip3 install git+https://github.com/TuxSH/firmtool.git
-          ASSET_URL=$(curl -s https://api.github.com/repos/3DSGuy/Project_CTR/releases \
-            | jq -r '[.[] | select(.tag_name | startswith("makerom"))][0].assets[] | select(.name | test("ubuntu")) | .browser_download_url')
-          curl -L "$ASSET_URL" -o makerom.zip
-          unzip -o makerom.zip -d /usr/local/bin
-          chmod +x /usr/local/bin/makerom
+          # Prebuilt makerom needs a newer glibc than this container has; build from source.
+          git clone --depth 1 --branch makerom-v0.18.4 https://github.com/3DSGuy/Project_CTR.git /tmp/Project_CTR
+          make -C /tmp/Project_CTR/makerom deps -j"$(nproc)" || true
+          make -C /tmp/Project_CTR/makerom -j"$(nproc)"
+          cp /tmp/Project_CTR/makerom/bin/makerom /usr/local/bin/makerom
           makerom -help 2>&1 | head -n 1 || true
           firmtool -v || true
 
