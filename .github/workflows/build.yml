@@ -18,17 +18,30 @@ jobs:
       - name: Trust checkout directory
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
+      # n3ds-mcp: makerom is pinned to a tag, so the built binary is identical
+      # on every run. Caching it turns a multi-minute from-source build into a
+      # restore step, which matters when iterating on firmware.
+      - name: Cache makerom
+        id: cache-makerom
+        uses: actions/cache@v4
+        with:
+          path: /usr/local/bin/makerom
+          key: makerom-v0.18.4-${{ runner.os }}-devkitarm
+
       - name: Install firmtool and makerom
         run: |
           set -ex
           apt-get update
           apt-get install -y python3-pip build-essential
           pip3 install --break-system-packages git+https://github.com/TuxSH/firmtool.git || pip3 install git+https://github.com/TuxSH/firmtool.git
-          # Prebuilt makerom needs a newer glibc than this container has; build from source.
-          git clone --depth 1 --branch makerom-v0.18.4 https://github.com/3DSGuy/Project_CTR.git /tmp/Project_CTR
-          make -C /tmp/Project_CTR/makerom deps -j"$(nproc)" || true
-          make -C /tmp/Project_CTR/makerom -j"$(nproc)"
-          cp /tmp/Project_CTR/makerom/bin/makerom /usr/local/bin/makerom
+          if [ ! -x /usr/local/bin/makerom ]; then
+            # Prebuilt makerom needs a newer glibc than this container has; build from source.
+            git clone --depth 1 --branch makerom-v0.18.4 https://github.com/3DSGuy/Project_CTR.git /tmp/Project_CTR
+            make -C /tmp/Project_CTR/makerom deps -j"$(nproc)" || true
+            make -C /tmp/Project_CTR/makerom -j"$(nproc)"
+            cp /tmp/Project_CTR/makerom/bin/makerom /usr/local/bin/makerom
+          fi
+          chmod +x /usr/local/bin/makerom
           makerom -help 2>&1 | head -n 1 || true
           firmtool -v || true
 

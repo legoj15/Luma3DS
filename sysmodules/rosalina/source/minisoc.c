@@ -306,6 +306,49 @@ int socListen(int sockfd, int max_connections)
     return 0;
 }
 
+// n3ds-mcp: bounded replacement for the open-coded sockaddr fill-in that was
+// duplicated in socAccept/_socuipc_cmd7/_socuipc_cmd8.
+//
+// The stock sequence was:
+//     if(*addrlen > tmpaddr[0]) *addrlen = tmpaddr[0];
+//     memcpy(addr->sa_data, &tmpaddr[2], *addrlen - 2);
+// socklen_t is unsigned and nothing floors the clamp, so any reply with
+// tmpaddr[0] < 2 turns "*addrlen - 2" into ~4GB and runs off the end of the
+// caller's sa_data. tmpaddr is memset to 0 before the IPC, so a soc:U reply
+// that reports success without filling in the address is enough to trigger it.
+// The clamp below is written against sizeof(sa_data) rather than a literal so
+// it stays correct whatever libctru's struct sockaddr looks like.
+static void _socFillSockaddr(struct sockaddr *addr, socklen_t *addrlen, const u8 *tmpaddr)
+{
+    u32 n;
+
+    if(addr == NULL)
+        return;
+
+    n = tmpaddr[0];
+    if(n > 0x1c)
+        n = 0x1c;
+    if(addrlen != NULL && *addrlen < n)
+        n = *addrlen;
+    if(n > 2 + sizeof(addr->sa_data))
+        n = 2 + sizeof(addr->sa_data);
+
+    if(n < 2)
+    {
+        // Nothing usable came back. Report an empty address instead of
+        // underflowing the length below.
+        if(addrlen != NULL)
+            *addrlen = 0;
+        return;
+    }
+
+    addr->sa_family = tmpaddr[1];
+    memcpy(addr->sa_data, &tmpaddr[2], n - 2);
+
+    if(addrlen != NULL)
+        *addrlen = n;
+}
+
 int socAccept(int sockfd, struct sockaddr *addr, socklen_t *addrlen)
 {
     Result ret = 0;
@@ -344,13 +387,8 @@ int socAccept(int sockfd, struct sockaddr *addr, socklen_t *addrlen)
     // if(ret < 0)
         //errno = -ret;
 
-    if(ret >= 0 && addr != NULL)
-    {
-        addr->sa_family = tmpaddr[1];
-        if(*addrlen > tmpaddr[0])
-            *addrlen = tmpaddr[0];
-        memcpy(addr->sa_data, &tmpaddr[2], *addrlen - 2);
-    }
+    if(ret >= 0)
+        _socFillSockaddr(addr, addrlen, tmpaddr); // n3ds-mcp: was an unbounded memcpy
 
     if(ret < 0)
         return -1;
@@ -571,12 +609,7 @@ static ssize_t _socuipc_cmd7(int sockfd, void *buf, size_t len, int flags, struc
         return -1;
     }
 
-    if(src_addr != NULL) {
-        src_addr->sa_family = tmpaddr[1];
-        if(*addrlen > tmpaddr[0])
-            *addrlen = tmpaddr[0];
-        memcpy(src_addr->sa_data, &tmpaddr[2], *addrlen - 2);
-    }
+    _socFillSockaddr(src_addr, addrlen, tmpaddr); // n3ds-mcp: was an unbounded memcpy
 
     return ret;
 }
@@ -612,15 +645,19 @@ static ssize_t _socuipc_cmd8(int sockfd, void *buf, size_t len, int flags, struc
     cmdbuf[0x10c>>2] = (u32)tmpaddr;
 
     ret = svcSendSyncRequest(miniSocHandle);
-    if(ret != 0) {
-        //errno = SYNC_ERROR;
-        return ret;
-    }
 
+    // n3ds-mcp: restore BEFORE the error return. The stock code returned early
+    // on a failed svcSendSyncRequest and left this thread's static-buffer
+    // descriptors pointing at our stack, corrupting every later IPC on it.
     cmdbuf[0x100>>2] = saved_threadstorage[0];
     cmdbuf[0x104>>2] = saved_threadstorage[1];
     cmdbuf[0x108>>2] = saved_threadstorage[2];
     cmdbuf[0x10c>>2] = saved_threadstorage[3];
+
+    if(ret != 0) {
+        //errno = SYNC_ERROR;
+        return ret;
+    }
 
     ret = (int)cmdbuf[1];
     if(ret == 0)
@@ -631,12 +668,7 @@ static ssize_t _socuipc_cmd8(int sockfd, void *buf, size_t len, int flags, struc
         return -1;
     }
 
-    if(src_addr != NULL) {
-        src_addr->sa_family = tmpaddr[1];
-        if(*addrlen > tmpaddr[0])
-            *addrlen = tmpaddr[0];
-        memcpy(src_addr->sa_data, &tmpaddr[2], *addrlen - 2);
-    }
+    _socFillSockaddr(src_addr, addrlen, tmpaddr); // n3ds-mcp: was an unbounded memcpy
 
     return ret;
 }
