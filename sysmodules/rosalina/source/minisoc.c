@@ -316,37 +316,35 @@ int socListen(int sockfd, int max_connections)
 // tmpaddr[0] < 2 turns "*addrlen - 2" into ~4GB and runs off the end of the
 // caller's sa_data. tmpaddr is memset to 0 before the IPC, so a soc:U reply
 // that reports success without filling in the address is enough to trigger it.
-// The clamp below is written against sizeof(sa_data) rather than a literal so
-// it stays correct whatever libctru's struct sockaddr looks like.
+//
+// Note that libctru declares sa_data as a flexible array member (char sa_data[]),
+// so there is no compiler-known destination size to clamp against -- the only
+// statement of the caller's capacity is *addrlen, which is why a NULL addrlen
+// means we cannot safely copy anything at all.
 static void _socFillSockaddr(struct sockaddr *addr, socklen_t *addrlen, const u8 *tmpaddr)
 {
     u32 n;
 
-    if(addr == NULL)
+    if(addr == NULL || addrlen == NULL)
         return;
 
     n = tmpaddr[0];
-    if(n > 0x1c)
+    if(n > 0x1c)        // bound by the source buffer
         n = 0x1c;
-    if(addrlen != NULL && *addrlen < n)
+    if(n > *addrlen)    // bound by the caller's buffer
         n = *addrlen;
-    if(n > 2 + sizeof(addr->sa_data))
-        n = 2 + sizeof(addr->sa_data);
 
     if(n < 2)
     {
         // Nothing usable came back. Report an empty address instead of
         // underflowing the length below.
-        if(addrlen != NULL)
-            *addrlen = 0;
+        *addrlen = 0;
         return;
     }
 
     addr->sa_family = tmpaddr[1];
     memcpy(addr->sa_data, &tmpaddr[2], n - 2);
-
-    if(addrlen != NULL)
-        *addrlen = n;
+    *addrlen = n;
 }
 
 int socAccept(int sockfd, struct sockaddr *addr, socklen_t *addrlen)
