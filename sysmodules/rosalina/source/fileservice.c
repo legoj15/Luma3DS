@@ -884,12 +884,19 @@ Result FileService_TryStart(void)
     // dies. A bind failure (WiFi not up yet) must cost a few retries, not the
     // system.
     static u32 attempts = 0;
+    static u64 lastAttemptTick = 0;
+    u64 now = svcGetSystemTick();
 
     if(g_running || g_threadLive)
         return 0;
-    if(attempts >= 5)
+    if(attempts >= 10)
+        return -1;
+    // Space attempts ~2s apart. The caller ticks every 50ms, so unspaced
+    // retries are all consumed before the network can possibly be ready.
+    if(lastAttemptTick != 0 && (now - lastAttemptTick) < (SYSCLOCK_ARM11 * 2))
         return -1;
 
+    lastAttemptTick = now;
     attempts++;
     g_shouldStop = false;
     g_threadLive = true;

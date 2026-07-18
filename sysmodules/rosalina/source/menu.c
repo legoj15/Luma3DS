@@ -383,7 +383,12 @@ void menuThreadMain(void)
         // n3ds-mcp: the file service replaces the ftpd dependency, which was
         // a homebrew app and so did not survive a reboot. Gated on the same
         // dev-mode switch; TryStart is a no-op once it is running.
-        if (DevMode_IsEnabled() && !FileService_IsRunning())
+        // Gated on inputRedirectionEnabled, not just dev mode: this loop ticks
+        // every 50ms, so starting eagerly burned every retry within a quarter
+        // second of boot -- long before WiFi was up and socGethostid() returned
+        // a real address. IR already waits for soc:U/ir:rst, so its being live
+        // is the readiness signal we need.
+        if (inputRedirectionEnabled && !FileService_IsRunning())
             FileService_TryStart();
 
         // n3ds-mcp fork: consume a one-shot remote reboot. Deliberately placed

@@ -20,19 +20,32 @@ static FS_ArchiveID DevMode_GetArchiveId(void)
     return (bool)out ? ARCHIVE_SDMC : ARCHIVE_NAND_RW;
 }
 
+static s8 g_cached = -1;   // -1 unknown, 0 off, 1 on
+
 bool DevMode_IsEnabled(void)
 {
     IFile file;
+
+    // Cached: this is polled from the 50ms menu tick and from the file
+    // service's stop check, and an SD open per call is real I/O for a value
+    // that only changes when someone uses the menu.
+    if(g_cached >= 0)
+        return g_cached == 1;
     if(R_FAILED(IFile_Open(&file, DevMode_GetArchiveId(), fsMakePath(PATH_EMPTY, ""),
                            fsMakePath(PATH_ASCII, DEVMODE_FLAG_PATH), FS_OPEN_READ)))
+    {
+        g_cached = 0;
         return false;
+    }
     IFile_Close(&file);
+    g_cached = 1;
     return true;
 }
 
 Result DevMode_SetEnabled(bool enable)
 {
     Result res;
+    g_cached = enable ? 1 : 0;
     if(enable)
     {
         IFile file;
