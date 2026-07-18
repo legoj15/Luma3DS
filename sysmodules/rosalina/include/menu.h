@@ -95,6 +95,7 @@ MyThread *menuCreateThread(void);
 void    menuEnter(void);
 void    menuLeave(void);
 bool    menuIsEntered(void); // n3ds-mcp fork; call under Draw_Lock
+s32     menuGetRefCount(void); // n3ds-mcp fork; lock-free, safe from any thread
 void    menuRequestClose(void);
 void    menuThreadMain(void);
 void    menuShow(Menu *root);

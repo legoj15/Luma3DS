@@ -47,6 +47,20 @@ Result InputRedirection_DoOrUndoPatches(void);
 // the menu thread's poll loop.
 extern bool remoteMenuCloseRequested;
 
+// One-shot "reboot the console" request, set by the IR UDP thread on the
+// RRBT command and consumed by the menu thread. Deliberately actioned from
+// the menu thread rather than the IR thread: that is the context
+// RosalinaMenu_PowerOffOrReboot already calls APT_HardwareResetAsync from.
+extern bool remoteRebootRequested;
+
+// Command magics. All are 8 bytes -- shorter than the 12-byte minimum of an
+// input packet -- so stock Luma discards them at the `n < 12` guard and this
+// protocol is backward-compatible by construction.
+#define REMOTE_CMD_LEN      8
+#define REMOTE_MAGIC_QUERY  "RSCR"  // read the Rosalina overlay as text
+#define REMOTE_MAGIC_REBOOT "RRBT"  // reboot; bytes 4..7 must match below
+#define REMOTE_REBOOT_KEY   0x3D5A1C7EU
+
 // Set once the user touches the InputRedirection menu item; permanently
 // disables autostart for this boot so manual intent is never overridden.
 extern bool inputRedirectionManuallyControlled;

@@ -378,6 +378,29 @@ void menuThreadMain(void)
         // boot (shell-closed keeps menuShouldExit true) can still arm itself.
         InputRedirection_HandleAutostart();
 
+        // n3ds-mcp fork: consume a one-shot remote reboot. Deliberately placed
+        // before the menuShouldExit gate, because the IR thread sets that flag
+        // too in order to unwind an open menu -- if the menu was up, menuShow
+        // has already returned and the existing menuLeave() below ran, so
+        // menuIsEntered() is false by the time we get here. Rebooting from
+        // this thread matches RosalinaMenu_PowerOffOrReboot, which is the only
+        // place APT_HardwareResetAsync is called today.
+        if (remoteRebootRequested)
+        {
+            bool stillEntered;
+
+            remoteRebootRequested = false;
+
+            Draw_Lock();
+            stillEntered = menuIsEntered();
+            Draw_Unlock();
+            if (stillEntered)
+                menuLeave();
+
+            APT_HardwareResetAsync();
+            return;
+        }
+
         // n3ds-mcp fork: consume a one-shot remote menu-close. By the time
         // control is back here, menuShow (if it was running) has unwound on
         // menuShouldExit; clearing both re-arms the menu, so a client that
@@ -423,12 +446,21 @@ void menuThreadMain(void)
     }
 }
 
-static s32 menuRefCount = 0;
+static volatile s32 menuRefCount = 0;
 
 // n3ds-mcp fork: whether menuEnter actually took effect. Call under Draw_Lock.
 bool menuIsEntered(void)
 {
     return menuRefCount > 0;
+}
+
+// n3ds-mcp fork: lock-free read for other threads (the IR responder answers
+// while the menu thread holds Draw_Lock for the whole time the overlay is up,
+// so taking the lock there would deadlock the reply). A single aligned 32-bit
+// load cannot tear on ARM11, and the reader only ever needs "is it > 0".
+s32 menuGetRefCount(void)
+{
+    return menuRefCount;
 }
 
 void menuEnter(void)

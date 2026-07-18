@@ -42,6 +42,11 @@ Handle inputRedirectionThreadStartedEvent;
 
 // n3ds-mcp fork state
 bool remoteMenuCloseRequested = false;
+bool remoteRebootRequested = false;
+
+// Rate limit for out-of-band commands: at most one reply per 20 ms.
+#define REMOTE_CMD_MIN_TICKS (SYSCLOCK_ARM11 / 50)
+static u64 lastRemoteCmdTick = 0;
 bool inputRedirectionManuallyControlled = false;
 static bool irThreadUnjoined = false;
 
@@ -140,10 +145,64 @@ void inputRedirectionThreadMain(void)
         int pollres = socPoll(&pfd, 1, 10);
         if(pollres > 0 && (pfd.revents & POLLIN))
         {
-            int n = socRecvfrom(sock, buf, 20, 0, NULL, 0);
+            // n3ds-mcp: a real sockaddr is now requested so command packets
+            // can be answered. Safe only because the minisoc fill-in was
+            // bounded first -- the stock code underflowed *addrlen here.
+            struct sockaddr_in src;
+            socklen_t srclen = sizeof(src);
+            int n = socRecvfrom(sock, buf, 20, 0, (struct sockaddr *)&src, &srclen);
             if(n < 0)
                 break;
-            else if(n < 12)
+
+            // n3ds-mcp: out-of-band commands. These are shorter than 12 bytes,
+            // so they fall through the guard below on stock Luma and can never
+            // be mistaken for HID data here.
+            if(n == REMOTE_CMD_LEN && srclen >= (socklen_t)sizeof(struct sockaddr_in))
+            {
+                u64 now = svcGetSystemTick();
+
+                // Rate limit. Without this an 8-byte flood would put a
+                // synchronous IPC on the thread that carries all HID
+                // injection -- such packets cost nothing today.
+                if(now - lastRemoteCmdTick < REMOTE_CMD_MIN_TICKS)
+                    continue;
+
+                if(memcmp(buf, REMOTE_MAGIC_REBOOT, 4) == 0)
+                {
+                    u32 key;
+                    memcpy(&key, buf + 4, 4);
+                    if(key == REMOTE_REBOOT_KEY)
+                    {
+                        lastRemoteCmdTick = now;
+                        // Force any open menu to unwind, then let the menu
+                        // thread do the actual reset.
+                        menuShouldExit = true;
+                        remoteRebootRequested = true;
+                    }
+                    continue;
+                }
+
+                if(memcmp(buf, REMOTE_MAGIC_QUERY, 4) == 0 && Wifi__IsConnected())
+                {
+                    lastRemoteCmdTick = now;
+
+                    // TRANSPORT PROBE (temporary): a fixed reply, purely to
+                    // establish that socSendto works from a socket BOUND to
+                    // socGethostid(). ntp.c only demonstrates sendto from an
+                    // unbound socket. The text grid replaces this payload once
+                    // the transport is confirmed on hardware.
+                    u8 reply[16] = { 'R', 'S', 'C', 'r' };
+                    reply[4] = buf[4];              // echo the client's seq
+                    reply[5] = buf[5];
+                    reply[6] = 0;                   // version 0 = probe build
+                    reply[7] = menuGetRefCount() > 0 ? 1 : 0;
+                    socSendto(sock, reply, sizeof(reply), 0,
+                              (struct sockaddr *)&src, srclen);
+                }
+                continue;
+            }
+
+            if(n < 12)
                 continue;
 
             memcpy(hidDataPhys, buf, 12);
