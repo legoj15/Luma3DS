@@ -36,6 +36,7 @@
 #include "sleep.h"
 #include "sock_util.h"
 #include "ifile.h"
+#include "fmt.h" // n3ds-mcp: sprintf, for the transport probe log
 
 bool inputRedirectionEnabled = false;
 Handle inputRedirectionThreadStartedEvent;
