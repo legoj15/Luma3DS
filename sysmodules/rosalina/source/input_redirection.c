@@ -37,6 +37,7 @@
 #include "sock_util.h"
 #include "ifile.h"
 #include "fmt.h" // n3ds-mcp: sprintf, for the transport probe log
+#include "draw.h" // n3ds-mcp: glyph mirror serialisation
 
 bool inputRedirectionEnabled = false;
 Handle inputRedirectionThreadStartedEvent;
@@ -633,33 +634,27 @@ void InputRedirection_HandleCommand(int cmdSock, u32 *errorCount)
 
     if(memcmp(cbuf, REMOTE_MAGIC_QUERY, 4) == 0)
     {
-        u8 reply[16] = { 'R', 'S', 'C', 'r' };
+        static u8 reply[REMOTE_REPLY_MAX]; // .bss, not the 0x4000 thread stack
+        u32 flags = 0;
+        u32 bodyLen;
+
+        if(menuGetRefCount() > 0)
+            flags |= 1u;
+
+        // Serialise straight into the packet after the 8-byte header. The
+        // cap is enforced during generation, so a dense screen drops trailing
+        // rows and sets the truncated flag rather than overrunning.
+        bodyLen = Draw_SerializeScreenText(reply + 8, REMOTE_REPLY_MAX - 8,
+                                           cbuf[6] & 0x03, &flags);
+
+        reply[0] = 'R'; reply[1] = 'S'; reply[2] = 'C'; reply[3] = 'r';
         reply[4] = cbuf[4];             // echo the client's seq
         reply[5] = cbuf[5];
-        reply[6] = 0;                   // version 0 = probe build
-        reply[7] = menuGetRefCount() > 0 ? 1 : 0;
+        reply[6] = 2;                   // wire format version
+        reply[7] = (u8)flags;
 
-        reply[8] = 1;
-        int sent = socSendto(cmdSock, reply, sizeof(reply), 0,
-                             (struct sockaddr *)&src, srclen);
-
-        int sent2 = 0, tmpsock = -1;
-        if(sent < 0)
-        {
-            tmpsock = socSocket(AF_INET, SOCK_DGRAM, 0);
-            if(tmpsock >= 0)
-            {
-                reply[8] = 2;
-                sent2 = socSendto(tmpsock, reply, sizeof(reply), 0,
-                                  (struct sockaddr *)&src, srclen);
-                socClose(tmpsock);
-            }
-        }
-
-        InputRedirection_WriteProbeLog(sent, sent2, tmpsock, (u32)srclen,
-                                       (u32)src.sin_family,
-                                       (u32)src.sin_addr.s_addr,
-                                       (u32)ntohs(src.sin_port));
+        socSendto(cmdSock, reply, 8 + bodyLen, 0,
+                  (struct sockaddr *)&src, srclen);
     }
 }
 

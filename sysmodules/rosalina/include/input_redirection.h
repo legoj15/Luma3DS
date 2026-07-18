@@ -56,6 +56,10 @@ void InputRedirection_WriteLifecycleLog(const char *event, int cmdSock, int a, i
 // The command channel lives on its own socket/port so that a fault in it can
 // never take down HID injection. 4950 stays exactly as upstream.
 #define REMOTE_CMD_PORT 4951
+
+// Reply cap. Comfortably inside a single datagram; the serialiser drops
+// trailing rows and flags truncation rather than exceeding it.
+#define REMOTE_REPLY_MAX 1400
 void InputRedirection_HandleCommand(int cmdSock, u32 *errorCount);
 
 // One-shot "close the Rosalina menu" request, set by the IR UDP thread on a

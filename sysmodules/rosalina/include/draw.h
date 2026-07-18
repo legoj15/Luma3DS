@@ -73,6 +73,14 @@
 #define SPACING_Y 11
 #define SPACING_X 6
 
+// n3ds-mcp glyph mirror: a shadow text grid of everything Rosalina draws, so
+// the overlay can be read remotely while the menu has gsp frozen and the video
+// stream is stalled. See docs/MENU-READOUT-DESIGN.md in the n3ds-mcp repo.
+#define ROSALINA_SCR_COLS   53  // SCREEN_BOT_WIDTH / SPACING_X
+#define ROSALINA_CURSOR_COL 2   // every cursor site draws at posX=10 -> (10+3)/6
+void Draw_MirrorInvalidate(void);
+u32  Draw_SerializeScreenText(u8 *out, u32 outSize, u32 wantPlanes, u32 *flags);
+
 #define COLOR_TITLE RGB565(0x00, 0x26, 0x1F)
 #define COLOR_WHITE RGB565(0x1F, 0x3F, 0x1F)
 #define COLOR_RED   RGB565(0x1F, 0x00, 0x00)

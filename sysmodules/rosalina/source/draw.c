@@ -56,9 +56,116 @@ void Draw_Unlock(void)
     RecursiveLock_Unlock(&lock);
 }
 
+// ---------------------------------------------------------------------------
+// n3ds-mcp: glyph mirror
+//
+// Every pixel Rosalina puts on the bottom screen goes through
+// Draw_DrawCharacter -- it is the only glyph write in the sysmodule -- so a
+// shadow text grid maintained here captures the ENTIRE overlay UI losslessly,
+// with zero edits at the ~218 call sites. That matters because the menu
+// freezes gsp, so the video stream stalls and the overlay is otherwise
+// invisible to a remote agent.
+//
+// Rows are keyed on the EXACT posY the firmware drew at, never quantised to a
+// fixed pitch: menu.c steps 11px (SPACING_Y) while plugin/display.c steps
+// 10px, and any fixed grid would silently merge two plugin menu items into one
+// hybrid string -- corruption that reads as valid data.
+// ---------------------------------------------------------------------------
+
+#define MIRROR_COLS 53   // SCREEN_BOT_WIDTH / SPACING_X
+#define MIRROR_ROWS 32
+
+typedef struct {
+    u8 posY;
+    u8 used;                  // one past the highest column written
+    u8 ch[MIRROR_COLS];
+    u8 attr[MIRROR_COLS];     // bit7 = draw origin, bits0-2 = colour index
+} MirrorRow;
+
+static MirrorRow g_rows[MIRROR_ROWS];
+static u32 g_nRows = 0;
+static volatile u32 g_scrEpoch = 0;
+static bool g_originPending = true;
+static bool g_rowsOverflowed = false;
+
+static u8 Draw_ColorIndex(u32 color)
+{
+    switch(color)
+    {
+        case COLOR_BLACK: return 0;
+        case COLOR_WHITE: return 1;
+        case COLOR_TITLE: return 2;
+        case COLOR_RED:   return 3;
+        case COLOR_GREEN: return 4;
+        case COLOR_LIME:  return 5;
+        default:          return 6;
+    }
+}
+
+// Called by the framebuffer setup/restore/fill paths. Without this the grid
+// would keep reporting stale menu text during the multi-second screenshot
+// window and screen-brightness phase 2, when Rosalina owns input but has
+// handed the framebuffer back and is drawing nothing.
+void Draw_MirrorInvalidate(void)
+{
+    g_nRows = 0;
+    g_rowsOverflowed = false;
+    g_originPending = true;
+    ++g_scrEpoch;
+}
+
+static void Draw_MirrorPut(u32 posX, u32 posY, u32 color, u8 character)
+{
+    u32 i, col;
+    MirrorRow *row = NULL;
+
+    if(posY >= SCREEN_BOT_HEIGHT || posX >= SCREEN_BOT_WIDTH)
+        return;
+
+    col = (posX + SPACING_X / 2) / SPACING_X;
+    if(col >= MIRROR_COLS)
+        return;
+
+    for(i = 0; i < g_nRows; i++)
+    {
+        if(g_rows[i].posY == (u8)posY)
+        {
+            row = &g_rows[i];
+            break;
+        }
+    }
+
+    if(row == NULL)
+    {
+        if(g_nRows >= MIRROR_ROWS)
+        {
+            g_rowsOverflowed = true;
+            return;
+        }
+        row = &g_rows[g_nRows++];
+        row->posY = (u8)posY;
+        row->used = 0;
+        for(i = 0; i < MIRROR_COLS; i++)
+        {
+            row->ch[i] = ' ';
+            row->attr[i] = 0;
+        }
+    }
+
+    row->ch[col] = character;
+    row->attr[col] = (u8)((g_originPending ? 0x80 : 0x00) | Draw_ColorIndex(color));
+    if(col + 1 > row->used)
+        row->used = (u8)(col + 1);
+
+    g_originPending = false;
+    ++g_scrEpoch;
+}
+
 void Draw_DrawCharacter(u32 posX, u32 posY, u32 color, char character)
 {
     u16 *const fb = (u16 *)FB_BOTTOM_VRAM_ADDR;
+
+    Draw_MirrorPut(posX, posY, color, (u8)character);
 
     s32 y;
     for(y = 0; y < 10; y++)
@@ -78,6 +185,12 @@ void Draw_DrawCharacter(u32 posX, u32 posY, u32 color, char character)
 
 u32 Draw_DrawString(u32 posX, u32 posY, u32 color, const char *string)
 {
+    // n3ds-mcp: mark the first glyph of this call as a draw origin, so the
+    // client can tell a wrapped continuation from a genuinely new item. The
+    // wrap below lands long cheat/plugin names on the next item's baseline,
+    // and without this the client would count them as separate entries.
+    g_originPending = true;
+
     for(u32 i = 0, line_i = 0; i < strlen(string); i++)
         switch(string[i])
         {
@@ -105,6 +218,9 @@ u32 Draw_DrawString(u32 posX, u32 posY, u32 color, const char *string)
                 break;
         }
 
+    // Re-arm so a following raw Draw_DrawCharacter also counts as an origin.
+    g_originPending = true;
+
     return posY;
 }
 
@@ -121,7 +237,115 @@ u32 Draw_DrawFormattedString(u32 posX, u32 posY, u32 color, const char *fmt, ...
 
 void Draw_FillFramebuffer(u32 value)
 {
+    Draw_MirrorInvalidate(); // n3ds-mcp
     memset(FB_BOTTOM_VRAM_ADDR, value, FB_BOTTOM_SIZE);
+}
+
+// n3ds-mcp: serialise the shadow grid into `out`, starting at the epoch field.
+// Writes: epoch(4) cols(1) nRows(1) payloadLen(2) then row records, each
+//   posY(1) textLen(1) text[textLen]  [+colour nibbles]  [+origin bits]
+// Rows are emitted ascending by posY. Every write is bounded during generation
+// rather than checked afterwards, so a dense screen truncates cleanly instead
+// of overrunning. Returns bytes written; sets flag bits 3/4/5.
+u32 Draw_SerializeScreenText(u8 *out, u32 outSize, u32 wantPlanes, u32 *flags)
+{
+    u32 order[MIRROR_ROWS];
+    u32 n, i, j, pos, payloadStart;
+    u32 epochBefore, epochAfter;
+    u32 emitted = 0;
+
+    if(outSize < 8)
+        return 0;
+
+    epochBefore = g_scrEpoch;
+
+    n = g_nRows;
+    if(n > MIRROR_ROWS)
+        n = MIRROR_ROWS;
+
+    // Insertion sort by posY. At most 32 entries, drawn in arbitrary order.
+    for(i = 0; i < n; i++)
+    {
+        u32 k = i;
+        order[i] = i;
+        while(k > 0 && g_rows[order[k - 1]].posY > g_rows[i].posY)
+        {
+            order[k] = order[k - 1];
+            k--;
+        }
+        order[k] = i;
+    }
+
+    pos = 8;                 // epoch(4) cols(1) nRows(1) payloadLen(2)
+    payloadStart = pos;
+
+    for(i = 0; i < n; i++)
+    {
+        const MirrorRow *row = &g_rows[order[i]];
+        u32 len = row->used;
+        u32 need;
+
+        while(len > 0 && row->ch[len - 1] == ' ')
+            len--;                              // trim trailing spaces
+
+        need = 2 + len;
+        if(wantPlanes & 1) need += (len + 1) / 2;
+        if(wantPlanes & 2) need += (len + 7) / 8;
+
+        if(pos + need > outSize)
+        {
+            *flags |= (1u << 5);                // truncated
+            break;
+        }
+
+        out[pos++] = row->posY;
+        out[pos++] = (u8)len;
+        for(j = 0; j < len; j++)
+            out[pos++] = row->ch[j];
+
+        if(wantPlanes & 1)
+        {
+            for(j = 0; j < len; j += 2)
+            {
+                u8 lo = (u8)(row->attr[j] & 0x07);
+                u8 hi = (j + 1 < len) ? (u8)(row->attr[j + 1] & 0x07) : 0;
+                out[pos++] = (u8)(lo | (hi << 4));
+            }
+        }
+
+        if(wantPlanes & 2)
+        {
+            for(j = 0; j < len; j += 8)
+            {
+                u8 bits = 0, b;
+                for(b = 0; b < 8 && j + b < len; b++)
+                    if(row->attr[j + b] & 0x80)
+                        bits |= (u8)(1u << b);
+                out[pos++] = bits;
+            }
+        }
+
+        emitted++;
+    }
+
+    epochAfter = g_scrEpoch;
+    if(epochAfter != epochBefore)
+        *flags |= (1u << 3);                    // torn read
+    if(g_rowsOverflowed)
+        *flags |= (1u << 4);
+    if(wantPlanes & 1) *flags |= (1u << 1);
+    if(wantPlanes & 2) *flags |= (1u << 2);
+
+    out[0] = (u8)(epochBefore);
+    out[1] = (u8)(epochBefore >> 8);
+    out[2] = (u8)(epochBefore >> 16);
+    out[3] = (u8)(epochBefore >> 24);
+    out[4] = MIRROR_COLS;
+    out[5] = (u8)emitted;
+    out[6] = (u8)((pos - payloadStart) & 0xFF);
+    out[7] = (u8)(((pos - payloadStart) >> 8) & 0xFF);
+
+    return pos;
 }
 
 void Draw_ClearFramebuffer(void)
@@ -212,6 +436,11 @@ u32 Draw_SetupFramebuffer(void)
 
 void Draw_RestoreFramebuffer(void)
 {
+    // n3ds-mcp: the app's frame is going back on screen. Anything the mirror
+    // still holds is no longer what a person would see -- this is the
+    // screenshot window and brightness phase 2, where Rosalina keeps input
+    // but stops drawing. Reporting stale menu text there would be a lie.
+    Draw_MirrorInvalidate();
     memcpy(FB_BOTTOM_VRAM_ADDR, framebufferCache, FB_BOTTOM_SIZE);
     Draw_FlushFramebuffer();
 
