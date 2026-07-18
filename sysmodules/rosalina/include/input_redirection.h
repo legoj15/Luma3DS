@@ -42,8 +42,18 @@ Result InputRedirection_DoOrUndoPatches(void);
 // n3ds-mcp fork additions
 #define IR_AUTOSTART_FLAG_PATH "/luma/inputredirection_autostart.flag"
 
+// One-shot "close the Rosalina menu" request, set by the IR UDP thread on a
+// bit3 rising edge and consumed (cleared, together with menuShouldExit) by
+// the menu thread's poll loop.
+extern bool remoteMenuCloseRequested;
+
+// Set once the user touches the InputRedirection menu item; permanently
+// disables autostart for this boot so manual intent is never overridden.
+extern bool inputRedirectionManuallyControlled;
+
 Result InputRedirection_TryStart(void);
 bool InputRedirection_IsAutostartEnabled(void);
 Result InputRedirection_SetAutostartEnabled(bool enable);
 void InputRedirection_HandleAutostart(void);
+bool InputRedirection_AutostartPending(void);
 

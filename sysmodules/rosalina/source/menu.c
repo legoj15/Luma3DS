@@ -373,22 +373,47 @@ void menuThreadMain(void)
     while(!preTerminationRequested)
     {
         svcSleepThread(50 * 1000 * 1000LL);
+
+        // n3ds-mcp fork: runs before the menuShouldExit gate so a lid-closed
+        // boot (shell-closed keeps menuShouldExit true) can still arm itself.
+        InputRedirection_HandleAutostart();
+
+        // n3ds-mcp fork: consume a one-shot remote menu-close. By the time
+        // control is back here, menuShow (if it was running) has unwound on
+        // menuShouldExit; clearing both re-arms the menu, so a client that
+        // dies mid-pulse can never leave the menu machinery wedged.
+        if (remoteMenuCloseRequested)
+        {
+            remoteMenuCloseRequested = false;
+            menuShouldExit = false;
+        }
+
         if (menuShouldExit)
             continue;
 
         Cheat_ApplyCheats();
-
-        InputRedirection_HandleAutostart(); // n3ds-mcp fork
 
         u32 kHeld = scanHeldKeys();
 
         if(((kHeld & menuCombo) == menuCombo) && !g_blockMenuOpen)
         {
             menuEnter();
-            if(isN3DS) N3DSMenu_UpdateStatus();
-            PluginLoader__UpdateMenu();
-            menuShow(&rosalinaMenu);
-            menuLeave();
+            // n3ds-mcp fork: menuEnter can decline (menuShouldExit flipped by
+            // another thread in the window since the check above, or the
+            // framebuffer cache allocation failed). Showing the menu anyway
+            // would draw over live app VRAM and menuLeave would underflow
+            // menuRefCount, permanently breaking the menu.
+            bool entered;
+            Draw_Lock();
+            entered = menuIsEntered();
+            Draw_Unlock();
+            if (entered)
+            {
+                if(isN3DS) N3DSMenu_UpdateStatus();
+                PluginLoader__UpdateMenu();
+                menuShow(&rosalinaMenu);
+                menuLeave();
+            }
         }
 
         if (saveSettingsRequest) {
@@ -399,6 +424,13 @@ void menuThreadMain(void)
 }
 
 static s32 menuRefCount = 0;
+
+// n3ds-mcp fork: whether menuEnter actually took effect. Call under Draw_Lock.
+bool menuIsEntered(void)
+{
+    return menuRefCount > 0;
+}
+
 void menuEnter(void)
 {
     Draw_Lock();
@@ -426,7 +458,10 @@ void menuLeave(void)
     svcSleepThread(50 * 1000 * 1000);
 
     Draw_Lock();
-    if(--menuRefCount == 0)
+    // n3ds-mcp fork: guard against underflow when a paired menuEnter declined
+    // (menuShouldExit race) -- decrementing past 0 would permanently disable
+    // framebuffer setup for every future menu open.
+    if(menuRefCount > 0 && --menuRefCount == 0)
     {
         Draw_RestoreFramebuffer();
         Draw_FreeFramebufferCache();

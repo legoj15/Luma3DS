@@ -144,7 +144,10 @@ static void handleSleepNotification(u32 notificationId)
     {
         case PTMNOTIFID_SLEEP_REQUESTED:
             menuShouldExit = true;
-            PTMSYSM_ReplyToSleepQuery(miniSocEnabled); // deny sleep request if we have network stuff running
+            // n3ds-mcp fork: also deny sleep while an armed InputRedirection
+            // autostart is still pending, so a lid-closed boot cannot sleep
+            // before the network channel comes up.
+            PTMSYSM_ReplyToSleepQuery(miniSocEnabled || InputRedirection_AutostartPending()); // deny sleep request if we have network stuff running
             break;
         case PTMNOTIFID_GOING_TO_SLEEP:
         case PTMNOTIFID_SLEEP_ALLOWED:

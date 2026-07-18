@@ -198,6 +198,10 @@ void MiscellaneousMenu_InputRedirection(void)
     bool wasEnabled = inputRedirectionEnabled;
     bool cantStart = false;
 
+    // n3ds-mcp fork: the user is taking manual control; autostart must never
+    // override whatever they decide here (for the rest of this boot).
+    inputRedirectionManuallyControlled = true;
+
     if(wasEnabled)
     {
         res = InputRedirection_Disable(5 * 1000 * 1000 * 1000LL);
@@ -290,7 +294,7 @@ void MiscellaneousMenu_ToggleInputRedirectionAutostart(void)
 {
     bool wasEnabled = InputRedirection_IsAutostartEnabled();
     Result res = InputRedirection_SetAutostartEnabled(!wasEnabled);
-    bool nowEnabled = InputRedirection_IsAutostartEnabled();
+    bool nowEnabled = !wasEnabled; // on success; on failure the old state stands
 
     Draw_Lock();
     Draw_ClearFramebuffer();
@@ -301,14 +305,16 @@ void MiscellaneousMenu_ToggleInputRedirectionAutostart(void)
     {
         Draw_Lock();
         Draw_DrawString(10, 10, COLOR_TITLE, "Miscellaneous options menu");
-        if(R_FAILED(res) && wasEnabled == nowEnabled)
+        if(res != 0)
             Draw_DrawFormattedString(10, 30, COLOR_WHITE, "Failed to update the autostart flag (0x%08lx).", (u32)res);
         else
             Draw_DrawFormattedString(
                 10, 30, COLOR_WHITE,
                 "InputRedirection autostart is now %s.\n\n"
                 "When enabled, InputRedirection starts on its own\n"
-                "shortly after boot. The setting is stored as:\n\n"
+                "shortly after boot. While it runs, the console\n"
+                "never sleeps (faster battery drain). The setting\n"
+                "is stored as:\n\n"
                 "%s\n\n"
                 "Delete that file (or use this toggle) to make the\n"
                 "console behave like stock again.",

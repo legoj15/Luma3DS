@@ -94,6 +94,7 @@ u32 menuCountItems(const Menu *menu);
 MyThread *menuCreateThread(void);
 void    menuEnter(void);
 void    menuLeave(void);
+bool    menuIsEntered(void); // n3ds-mcp fork; call under Draw_Lock
 void    menuRequestClose(void);
 void    menuThreadMain(void);
 void    menuShow(Menu *root);

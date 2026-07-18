@@ -40,6 +40,11 @@
 bool inputRedirectionEnabled = false;
 Handle inputRedirectionThreadStartedEvent;
 
+// n3ds-mcp fork state
+bool remoteMenuCloseRequested = false;
+bool inputRedirectionManuallyControlled = false;
+static bool irThreadUnjoined = false;
+
 static MyThread inputRedirectionThread;
 static u8 CTR_ALIGN(8) inputRedirectionThreadStack[0x4000];
 
@@ -160,14 +165,20 @@ void inputRedirectionThreadMain(void)
                 if(!(oldSpecialButtons & 4) && (specialButtons & 4)) // POWER button held long
                     srvPublishToSubscriber(0x203, 0);
 
-                // n3ds-mcp: bit3 force-closes the Rosalina menu (menuShouldExit is
-                // checked by every menu/submenu input loop, same path as the
-                // sleep-notification close). Edge-triggered so the client must pulse
-                // the bit; the falling edge re-arms the menu.
+                // n3ds-mcp: bit3 requests a force-close of the Rosalina menu
+                // (menuShouldExit is checked by every menu/submenu input loop,
+                // same path as the sleep-notification close). One-shot: the
+                // menu thread consumes remoteMenuCloseRequested and re-arms
+                // itself, so a client dying mid-pulse can never leave the menu
+                // machinery wedged. Write order matters: menuShouldExit must
+                // be set before the request flag, or the menu thread could
+                // consume the request between the two writes and leave
+                // menuShouldExit latched true.
                 if(!(oldSpecialButtons & 8) && (specialButtons & 8))
+                {
                     menuShouldExit = true;
-                else if((oldSpecialButtons & 8) && !(specialButtons & 8))
-                    menuShouldExit = false;
+                    remoteMenuCloseRequested = true;
+                }
             }
         }
         else if(pollres < -10000)
@@ -554,6 +565,12 @@ Result InputRedirection_TryStart(void)
                 svcCloseHandle(inputRedirectionThreadStartedEvent);
                 InputRedirection_DoOrUndoPatches();
                 inputRedirectionEnabled = false;
+                // The thread was created above; make sure it is actually gone
+                // before anyone can retry with the same static struct/stack.
+                // If it is wedged (e.g. inside a stalled soc init), record
+                // that so the autostart path never re-creates it.
+                if(R_FAILED(MyThread_Join(&inputRedirectionThread, 2 * 1000 * 1000 * 1000LL)))
+                    irThreadUnjoined = true;
             }
             inputRedirectionStartResult = 0;
         }
@@ -561,47 +578,61 @@ Result InputRedirection_TryStart(void)
     return res;
 }
 
-// Called every 50ms from the menu thread while the menu is closed. Waits for
-// the same services the Miscellaneous menu item requires (guards against the
-// too-early starts of issues #506/#743), then a settle delay, then starts.
+// Autostart state machine, driven at 50ms ticks by the menu thread (also while
+// the shell is closed, so a lid-closed boot can still arm itself).
+static enum {
+    AUTOSTART_UNREAD,        // flag file not read yet
+    AUTOSTART_WAIT_SERVICES, // flag present, waiting for soc:U (+ir:rst on N3DS)
+    AUTOSTART_SETTLING,      // services up, settle delay / retry backoff
+    AUTOSTART_DONE,          // started, gave up, disabled, or manually overridden
+} autostartState = AUTOSTART_UNREAD;
+
+// True while an armed autostart still intends to start InputRedirection.
+// main.c uses this to deny sleep during that window (mirroring the
+// miniSocEnabled deny), so a lid-closed boot cannot sleep before arming.
+bool InputRedirection_AutostartPending(void)
+{
+    return autostartState == AUTOSTART_WAIT_SERVICES || autostartState == AUTOSTART_SETTLING;
+}
+
+// Called every 50ms from the menu thread. Waits for the same services the
+// Miscellaneous menu item requires (guards against the too-early starts of
+// issues #506/#743), then a settle delay, then starts.
 void InputRedirection_HandleAutostart(void)
 {
-    static enum {
-        AUTOSTART_PENDING,
-        AUTOSTART_SETTLING,
-        AUTOSTART_DONE,
-    } state = AUTOSTART_PENDING;
     static u32 ticks = 0;
     static u32 attempts = 0;
 
-    if(state == AUTOSTART_DONE)
+    if(autostartState == AUTOSTART_DONE)
         return;
 
-    if(inputRedirectionEnabled || preTerminationRequested)
+    if(inputRedirectionEnabled || preTerminationRequested || inputRedirectionManuallyControlled)
     {
-        state = AUTOSTART_DONE;
+        autostartState = AUTOSTART_DONE;
         return;
     }
 
-    bool registered = false;
-    bool ready = R_SUCCEEDED(srvIsServiceRegistered(&registered, "soc:U")) && registered;
-    if(ready && isN3DS)
+    if(autostartState == AUTOSTART_UNREAD)
     {
-        registered = false;
-        ready = R_SUCCEEDED(srvIsServiceRegistered(&registered, "ir:rst")) && registered;
-    }
-    if(!ready)
+        // fs services are up well before the menu thread's service waits
+        // complete, so the flag can be read on the first tick.
+        autostartState = InputRedirection_IsAutostartEnabled() ? AUTOSTART_WAIT_SERVICES
+                                                              : AUTOSTART_DONE;
         return;
+    }
 
-    if(state == AUTOSTART_PENDING)
+    if(autostartState == AUTOSTART_WAIT_SERVICES)
     {
-        // Only read the flag once the system is loaded (SD is mounted by then)
-        if(!InputRedirection_IsAutostartEnabled())
+        bool registered = false;
+        bool ready = R_SUCCEEDED(srvIsServiceRegistered(&registered, "soc:U")) && registered;
+        if(ready && isN3DS)
         {
-            state = AUTOSTART_DONE;
-            return;
+            registered = false;
+            ready = R_SUCCEEDED(srvIsServiceRegistered(&registered, "ir:rst")) && registered;
         }
-        state = AUTOSTART_SETTLING;
+        if(!ready)
+            return;
+        autostartState = AUTOSTART_SETTLING;
         ticks = 0;
         return;
     }
@@ -609,15 +640,19 @@ void InputRedirection_HandleAutostart(void)
     if(ticks++ < 100) // ~5s after services appear; retries re-enter at ~3s
         return;
 
-    if(R_SUCCEEDED(InputRedirection_TryStart()))
+    // Note: != 0 (not R_SUCCEEDED) -- the 10s event-wait timeout Result is
+    // positive and must count as failure, matching the menu item's check.
+    if(InputRedirection_TryStart() == 0)
     {
         miscellaneousMenu.items[2].title = "Stop InputRedirection";
-        state = AUTOSTART_DONE;
+        autostartState = AUTOSTART_DONE;
     }
     else
     {
         ticks = 40;
-        if(++attempts >= 5)
-            state = AUTOSTART_DONE;
+        // Never retry if a previous attempt's thread could not be joined --
+        // re-creating it on the same static stack would corrupt memory.
+        if(irThreadUnjoined || ++attempts >= 5)
+            autostartState = AUTOSTART_DONE;
     }
 }
