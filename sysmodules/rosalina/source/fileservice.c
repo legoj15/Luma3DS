@@ -830,6 +830,18 @@ void fileServiceThreadMain(void)
     if(socBind(commitSock, (struct sockaddr *)&addr, sizeof(addr)) != 0)
         goto cleanup;
 
+    // IFile_Open with CREATE does not create parent directories, so without
+    // this every STOR fails with "cannot create" and the service is read-only.
+    {
+        FS_Archive archive;
+        if(R_SUCCEEDED(FSUSER_OpenArchive(&archive, ARCHIVE_SDMC,
+                                          fsMakePath(PATH_EMPTY, ""))))
+        {
+            FSUSER_CreateDirectory(archive, fsMakePath(PATH_ASCII, "/luma/staging"), 0);
+            FSUSER_CloseArchive(archive);
+        }
+    }
+
     FS_NewNonce();
     FS_Log("file service listening: ftp %u, commit %u\n",
            (unsigned)FS_CTRL_PORT, (unsigned)FS_COMMIT_PORT);
