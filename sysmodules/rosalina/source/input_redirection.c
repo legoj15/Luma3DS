@@ -31,9 +31,11 @@
 #include "input_redirection.h"
 #include "process_patches.h"
 #include "menus.h"
+#include "menus/miscellaneous.h"
 #include "memory.h"
 #include "sleep.h"
 #include "sock_util.h"
+#include "ifile.h"
 
 bool inputRedirectionEnabled = false;
 Handle inputRedirectionThreadStartedEvent;
@@ -157,6 +159,15 @@ void inputRedirectionThreadMain(void)
 
                 if(!(oldSpecialButtons & 4) && (specialButtons & 4)) // POWER button held long
                     srvPublishToSubscriber(0x203, 0);
+
+                // n3ds-mcp: bit3 force-closes the Rosalina menu (menuShouldExit is
+                // checked by every menu/submenu input loop, same path as the
+                // sleep-notification close). Edge-triggered so the client must pulse
+                // the bit; the falling edge re-arms the menu.
+                if(!(oldSpecialButtons & 8) && (specialButtons & 8))
+                    menuShouldExit = true;
+                else if((oldSpecialButtons & 8) && !(specialButtons & 8))
+                    menuShouldExit = false;
             }
         }
         else if(pollres < -10000)
@@ -477,4 +488,136 @@ cleanup:
     svcCloseHandle(hidProcHandle);
     svcCloseHandle(irProcHandle);
     return res;
+}
+
+// n3ds-mcp fork additions ---------------------------------------------------
+
+static FS_ArchiveID InputRedirection_GetCfgArchiveId(void)
+{
+    s64 out = 0;
+    svcGetSystemInfo(&out, 0x10000, 0x203); // isSdMode
+    return (bool)out ? ARCHIVE_SDMC : ARCHIVE_NAND_RW;
+}
+
+bool InputRedirection_IsAutostartEnabled(void)
+{
+    IFile file;
+    Result res = IFile_Open(&file, InputRedirection_GetCfgArchiveId(), fsMakePath(PATH_EMPTY, ""),
+                            fsMakePath(PATH_ASCII, IR_AUTOSTART_FLAG_PATH), FS_OPEN_READ);
+    if(R_FAILED(res))
+        return false;
+    IFile_Close(&file);
+    return true;
+}
+
+Result InputRedirection_SetAutostartEnabled(bool enable)
+{
+    Result res;
+    if(enable)
+    {
+        IFile file;
+        res = IFile_Open(&file, InputRedirection_GetCfgArchiveId(), fsMakePath(PATH_EMPTY, ""),
+                         fsMakePath(PATH_ASCII, IR_AUTOSTART_FLAG_PATH), FS_OPEN_CREATE | FS_OPEN_WRITE);
+        if(R_SUCCEEDED(res))
+            IFile_Close(&file);
+    }
+    else
+    {
+        FS_Archive archive;
+        res = FSUSER_OpenArchive(&archive, InputRedirection_GetCfgArchiveId(), fsMakePath(PATH_EMPTY, ""));
+        if(R_SUCCEEDED(res))
+        {
+            res = FSUSER_DeleteFile(archive, fsMakePath(PATH_ASCII, IR_AUTOSTART_FLAG_PATH));
+            FSUSER_CloseArchive(archive);
+        }
+    }
+    return res;
+}
+
+// Same start sequence as the Miscellaneous menu item, factored out so the
+// autostart path and the menu share one implementation.
+Result InputRedirection_TryStart(void)
+{
+    Result res = InputRedirection_DoOrUndoPatches();
+    if(R_SUCCEEDED(res))
+    {
+        res = svcCreateEvent(&inputRedirectionThreadStartedEvent, RESET_STICKY);
+        if(R_SUCCEEDED(res))
+        {
+            inputRedirectionCreateThread();
+            res = svcWaitSynchronization(inputRedirectionThreadStartedEvent, 10 * 1000 * 1000 * 1000LL);
+            if(res == 0)
+                res = (Result)inputRedirectionStartResult;
+
+            if(res != 0)
+            {
+                svcCloseHandle(inputRedirectionThreadStartedEvent);
+                InputRedirection_DoOrUndoPatches();
+                inputRedirectionEnabled = false;
+            }
+            inputRedirectionStartResult = 0;
+        }
+    }
+    return res;
+}
+
+// Called every 50ms from the menu thread while the menu is closed. Waits for
+// the same services the Miscellaneous menu item requires (guards against the
+// too-early starts of issues #506/#743), then a settle delay, then starts.
+void InputRedirection_HandleAutostart(void)
+{
+    static enum {
+        AUTOSTART_PENDING,
+        AUTOSTART_SETTLING,
+        AUTOSTART_DONE,
+    } state = AUTOSTART_PENDING;
+    static u32 ticks = 0;
+    static u32 attempts = 0;
+
+    if(state == AUTOSTART_DONE)
+        return;
+
+    if(inputRedirectionEnabled || preTerminationRequested)
+    {
+        state = AUTOSTART_DONE;
+        return;
+    }
+
+    bool registered = false;
+    bool ready = R_SUCCEEDED(srvIsServiceRegistered(&registered, "soc:U")) && registered;
+    if(ready && isN3DS)
+    {
+        registered = false;
+        ready = R_SUCCEEDED(srvIsServiceRegistered(&registered, "ir:rst")) && registered;
+    }
+    if(!ready)
+        return;
+
+    if(state == AUTOSTART_PENDING)
+    {
+        // Only read the flag once the system is loaded (SD is mounted by then)
+        if(!InputRedirection_IsAutostartEnabled())
+        {
+            state = AUTOSTART_DONE;
+            return;
+        }
+        state = AUTOSTART_SETTLING;
+        ticks = 0;
+        return;
+    }
+
+    if(ticks++ < 100) // ~5s after services appear; retries re-enter at ~3s
+        return;
+
+    if(R_SUCCEEDED(InputRedirection_TryStart()))
+    {
+        miscellaneousMenu.items[2].title = "Stop InputRedirection";
+        state = AUTOSTART_DONE;
+    }
+    else
+    {
+        ticks = 40;
+        if(++attempts >= 5)
+            state = AUTOSTART_DONE;
+    }
 }

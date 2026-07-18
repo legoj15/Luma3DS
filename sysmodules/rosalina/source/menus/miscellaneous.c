@@ -70,6 +70,7 @@ Menu miscellaneousMenu = {
         { "Switch the hb. title to the current app.", METHOD, .method = &MiscellaneousMenu_SwitchBoot3dsxTargetTitle },
         { "Change the menu combo", METHOD, .method = &MiscellaneousMenu_ChangeMenuCombo },
         { "Start InputRedirection", METHOD, .method = &MiscellaneousMenu_InputRedirection },
+        { "Toggle InputRedirection autostart", METHOD, .method = &MiscellaneousMenu_ToggleInputRedirectionAutostart },
         { "Update time and date via NTP", METHOD, .method = &MiscellaneousMenu_UpdateTimeDateNtp },
         { "Nullify user time offset", METHOD, .method = &MiscellaneousMenu_NullifyUserTimeOffset },
         { "Dump DSP firmware", METHOD, .method = &MiscellaneousMenu_DumpDspFirm },
@@ -240,26 +241,7 @@ void MiscellaneousMenu_InputRedirection(void)
             Draw_DrawString(10, 30, COLOR_WHITE, "Starting InputRedirection...");
             if(!done)
             {
-                res = InputRedirection_DoOrUndoPatches();
-                if(R_SUCCEEDED(res))
-                {
-                    res = svcCreateEvent(&inputRedirectionThreadStartedEvent, RESET_STICKY);
-                    if(R_SUCCEEDED(res))
-                    {
-                        inputRedirectionCreateThread();
-                        res = svcWaitSynchronization(inputRedirectionThreadStartedEvent, 10 * 1000 * 1000 * 1000LL);
-                        if(res == 0)
-                            res = (Result)inputRedirectionStartResult;
-
-                        if(res != 0)
-                        {
-                            svcCloseHandle(inputRedirectionThreadStartedEvent);
-                            InputRedirection_DoOrUndoPatches();
-                            inputRedirectionEnabled = false;
-                        }
-                        inputRedirectionStartResult = 0;
-                    }
-                }
+                res = InputRedirection_TryStart(); // n3ds-mcp fork: shared with autostart
 
                 if(res != 0)
                     sprintf(buf, "Starting InputRedirection... failed (0x%08lx).", (u32)res);
@@ -296,6 +278,42 @@ void MiscellaneousMenu_InputRedirection(void)
                 Draw_DrawString(10, 30, COLOR_WHITE, buf);
         }
 
+        Draw_FlushFramebuffer();
+        Draw_Unlock();
+    }
+    while(!(waitInput() & KEY_B) && !menuShouldExit);
+}
+
+// n3ds-mcp fork: persistent autostart toggle, stored as a flag file so that
+// stock Luma3DS and its config.ini are entirely unaffected.
+void MiscellaneousMenu_ToggleInputRedirectionAutostart(void)
+{
+    bool wasEnabled = InputRedirection_IsAutostartEnabled();
+    Result res = InputRedirection_SetAutostartEnabled(!wasEnabled);
+    bool nowEnabled = InputRedirection_IsAutostartEnabled();
+
+    Draw_Lock();
+    Draw_ClearFramebuffer();
+    Draw_FlushFramebuffer();
+    Draw_Unlock();
+
+    do
+    {
+        Draw_Lock();
+        Draw_DrawString(10, 10, COLOR_TITLE, "Miscellaneous options menu");
+        if(R_FAILED(res) && wasEnabled == nowEnabled)
+            Draw_DrawFormattedString(10, 30, COLOR_WHITE, "Failed to update the autostart flag (0x%08lx).", (u32)res);
+        else
+            Draw_DrawFormattedString(
+                10, 30, COLOR_WHITE,
+                "InputRedirection autostart is now %s.\n\n"
+                "When enabled, InputRedirection starts on its own\n"
+                "shortly after boot. The setting is stored as:\n\n"
+                "%s\n\n"
+                "Delete that file (or use this toggle) to make the\n"
+                "console behave like stock again.",
+                nowEnabled ? "ENABLED" : "DISABLED", IR_AUTOSTART_FLAG_PATH
+            );
         Draw_FlushFramebuffer();
         Draw_Unlock();
     }

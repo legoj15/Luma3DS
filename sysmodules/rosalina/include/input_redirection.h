@@ -39,3 +39,11 @@ void inputRedirectionThreadMain(void);
 Result InputRedirection_Disable(s64 timeout);
 Result InputRedirection_DoOrUndoPatches(void);
 
+// n3ds-mcp fork additions
+#define IR_AUTOSTART_FLAG_PATH "/luma/inputredirection_autostart.flag"
+
+Result InputRedirection_TryStart(void);
+bool InputRedirection_IsAutostartEnabled(void);
+Result InputRedirection_SetAutostartEnabled(bool enable);
+void InputRedirection_HandleAutostart(void);
+

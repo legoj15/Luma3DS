@@ -39,6 +39,7 @@
 #include "plugin.h"
 #include "menus/screen_filters.h"
 #include "shell.h"
+#include "input_redirection.h"
 
 //#define ROSALINA_MENU_SELF_SCREENSHOT 1 // uncomment this to enable the feature
 
@@ -376,6 +377,8 @@ void menuThreadMain(void)
             continue;
 
         Cheat_ApplyCheats();
+
+        InputRedirection_HandleAutostart(); // n3ds-mcp fork
 
         u32 kHeld = scanHeldKeys();
 
