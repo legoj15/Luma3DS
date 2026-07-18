@@ -42,6 +42,12 @@ Result InputRedirection_DoOrUndoPatches(void);
 // n3ds-mcp fork additions
 #define IR_AUTOSTART_FLAG_PATH "/luma/inputredirection_autostart.flag"
 
+// n3ds-mcp TRANSPORT PROBE (temporary): where the socSendto diagnosis lands.
+// Plain integer args so this header keeps its (deliberately tiny) include set.
+#define IR_PROBE_LOG_PATH "/luma/n3ds-mcp-probe.txt"
+void InputRedirection_WriteProbeLog(int sent, int sent2, int tmpsock,
+                                    u32 srclen, u32 family, u32 addrBE, u32 portHost);
+
 // One-shot "close the Rosalina menu" request, set by the IR UDP thread on a
 // bit3 rising edge and consumed (cleared, together with menuShouldExit) by
 // the menu thread's poll loop.

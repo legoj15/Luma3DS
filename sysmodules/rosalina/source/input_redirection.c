@@ -182,22 +182,57 @@ void inputRedirectionThreadMain(void)
                     continue;
                 }
 
-                if(memcmp(buf, REMOTE_MAGIC_QUERY, 4) == 0 && Wifi__IsConnected())
+                if(memcmp(buf, REMOTE_MAGIC_QUERY, 4) == 0)
                 {
                     lastRemoteCmdTick = now;
 
                     // TRANSPORT PROBE (temporary): a fixed reply, purely to
-                    // establish that socSendto works from a socket BOUND to
-                    // socGethostid(). ntp.c only demonstrates sendto from an
-                    // unbound socket. The text grid replaces this payload once
-                    // the transport is confirmed on hardware.
+                    // establish whether socSendto works at all from this
+                    // thread. socSendto has NO callers anywhere in Rosalina,
+                    // so it is entirely unexercised code -- exactly like the
+                    // recvfrom sockaddr path that turned out to be broken.
+                    //
+                    // NOTE: deliberately NOT gated on Wifi__IsConnected().
+                    // We just received a datagram from the client, which is
+                    // far stronger evidence the network works than an ac:u
+                    // status query -- and that call does two IPC round-trips
+                    // on the thread that carries all HID injection, so it can
+                    // only ever produce false negatives here.
                     u8 reply[16] = { 'R', 'S', 'C', 'r' };
                     reply[4] = buf[4];              // echo the client's seq
                     reply[5] = buf[5];
                     reply[6] = 0;                   // version 0 = probe build
                     reply[7] = menuGetRefCount() > 0 ? 1 : 0;
-                    socSendto(sock, reply, sizeof(reply), 0,
-                              (struct sockaddr *)&src, srclen);
+
+                    // Path 1: the bound socket.
+                    reply[8] = 1;
+                    int sent = socSendto(sock, reply, sizeof(reply), 0,
+                                         (struct sockaddr *)&src, srclen);
+
+                    // Path 2: a fresh unbound socket, if the bound one refused.
+                    int sent2 = 0, tmpsock = -1;
+                    if(sent < 0)
+                    {
+                        tmpsock = socSocket(AF_INET, SOCK_DGRAM, 0);
+                        if(tmpsock >= 0)
+                        {
+                            reply[8] = 2;
+                            sent2 = socSendto(tmpsock, reply, sizeof(reply), 0,
+                                              (struct sockaddr *)&src, srclen);
+                            socClose(tmpsock);
+                        }
+                    }
+
+                    // Report through a channel that does NOT depend on the
+                    // thing being tested. If no reply reaches the PC, this
+                    // file still says why -- and in particular distinguishes
+                    // "the console failed to send" from "the send succeeded
+                    // and something on the network or PC dropped it".
+                    InputRedirection_WriteProbeLog(sent, sent2, tmpsock,
+                                                   (u32)srclen,
+                                                   (u32)src.sin_family,
+                                                   (u32)src.sin_addr.s_addr,
+                                                   (u32)ntohs(src.sin_port));
                 }
                 continue;
             }
@@ -567,6 +602,46 @@ static FS_ArchiveID InputRedirection_GetCfgArchiveId(void)
     s64 out = 0;
     svcGetSystemInfo(&out, 0x10000, 0x203); // isSdMode
     return (bool)out ? ARCHIVE_SDMC : ARCHIVE_NAND_RW;
+}
+
+// n3ds-mcp TRANSPORT PROBE (temporary). Reports socSendto results through the
+// SD card, because the thing being diagnosed IS the reply path -- using it to
+// report on itself would tell us nothing when it fails. Fetch over ftpd.
+void InputRedirection_WriteProbeLog(int sent, int sent2, int tmpsock,
+                                    u32 srclen, u32 family, u32 addrBE, u32 portHost)
+{
+    IFile file;
+    char text[320];
+    u64 written = 0;
+    u32 ip = addrBE;
+
+    int len = sprintf(text,
+        "n3ds-mcp transport probe\n"
+        "bound socSendto  : %d   (16 = sent, negative = refused)\n"
+        "fallback socket  : %d   (fd %d; only tried if bound failed)\n"
+        "recvfrom srclen  : %u\n"
+        "peer family      : %u   (2 = AF_INET)\n"
+        "peer addr        : %u.%u.%u.%u:%u\n"
+        "\n"
+        "If bound socSendto is 16 the console DID send and the packet was lost\n"
+        "on the network or dropped by the PC firewall -- not a firmware issue.\n",
+        sent, sent2, tmpsock, (unsigned)srclen, (unsigned)family,
+        (unsigned)(ip & 0xFF), (unsigned)((ip >> 8) & 0xFF),
+        (unsigned)((ip >> 16) & 0xFF), (unsigned)((ip >> 24) & 0xFF),
+        (unsigned)portHost);
+
+    if(len <= 0)
+        return;
+
+    if(R_SUCCEEDED(IFile_Open(&file, InputRedirection_GetCfgArchiveId(),
+                              fsMakePath(PATH_EMPTY, ""),
+                              fsMakePath(PATH_ASCII, IR_PROBE_LOG_PATH),
+                              FS_OPEN_CREATE | FS_OPEN_WRITE)))
+    {
+        IFile_SetSize(&file, 0);
+        IFile_Write(&file, &written, text, (u32)len, 0);
+        IFile_Close(&file);
+    }
 }
 
 bool InputRedirection_IsAutostartEnabled(void)
